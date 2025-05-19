@@ -12,5 +12,5 @@ resolvers += "jitpack" at "https://jitpack.io"
 libraryDependencies ++= Seq(
   "com.typesafe.scala-logging" %% "scala-logging" % "3.9.5",
   "ch.qos.logback" % "logback-classic" % "1.5.18",
-  "com.github.esotericsoftware" % "kryonet" % "03a135e203"
+  "co.fs2" %% "fs2-io" % "3.11.0"
 )
