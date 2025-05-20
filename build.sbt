@@ -2,15 +2,17 @@ ThisBuild / version := "0.1.0-SNAPSHOT"
 
 ThisBuild / scalaVersion := "2.13.14"
 
+enablePlugins(AssemblyPlugin)
+
 lazy val root = (project in file("."))
   .settings(
-    name := "ISCRacer-Server"
+    name := "ISCRacer-Server",
+    Compile / mainClass := Some("Server")
   )
 
 resolvers += "jitpack" at "https://jitpack.io"
 
 libraryDependencies ++= Seq(
-  "com.typesafe.scala-logging" %% "scala-logging" % "3.9.5",
-  "ch.qos.logback" % "logback-classic" % "1.5.18",
-  "co.fs2" %% "fs2-io" % "3.11.0"
+  "co.fs2" %% "fs2-io" % "3.11.0",
+  "co.fs2" %% "fs2-core" % "3.11.0"
 )

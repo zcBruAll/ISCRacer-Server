@@ -12,18 +12,6 @@ object Server extends IOApp {
   case class PlayerInput(playerId: Int, action: String)
   case class CarState(carId: Int, x: Double, y: Double, direction: Double)
 
-  def tcpServer[F[_]: Concurrent: Network]: F[Unit] = {
-    Network[F].server(port = Some(port"5555")).map { client =>
-      client.reads
-        .through(text.utf8.decode)
-        .through(text.lines)
-        .interleave(Stream.constant("\n"))
-        .through(text.utf8.encode)
-        .through(client.writes)
-        .handleErrorWith(_ => Stream.empty)
-    }.parJoin(100).compile.drain
-  }
-
   def tcpLobbyServer(port: Port): Stream[IO, Unit] = {
     // Stream of client sockets listening on the given port
     Network[IO].server(address = None, port = Some(port))
@@ -38,8 +26,8 @@ object Server extends IOApp {
               clientSocket.write(Chunk.array(lobbyUpdateMsg.getBytes(StandardCharsets.UTF_8)))
             }
             .concurrently {
-              // Concurrently, you could also listen for any messages from the client (optional demo):
-              clientSocket.reads   // Stream of incoming bytes
+              // Concurrently, you could also listen for any messages from the client:
+              clientSocket.reads                        // Stream of incoming bytes
                 .through(text.utf8.decode)              // decode bytes to String
                 .evalMap(msg => IO.println(s"Received from TCP client: $msg"))
                 .handleErrorWith(_ => Stream.empty)     // ignore errors (e.g. client disconnect)
@@ -90,6 +78,7 @@ object Server extends IOApp {
           // Send the state to all client addresses
           clientAddresses.traverse_ { addr =>
             val datagram = Datagram(addr, Chunk.array(outBytes))
+            IO.println(s"UDP SENDIGN")
             socket.write(datagram)  // send the UDP packet to this address
           }
         }
@@ -102,7 +91,7 @@ object Server extends IOApp {
   // Predefine the client addresses for UDP broadcast (in practice, populate this dynamically)
   private val clientList: List[SocketAddress[IpAddress]] = List(
     SocketAddress(ip"127.0.0.1", port"6001"),
-    SocketAddress(ip"127.0.0.1", port"6002")
+    SocketAddress(ip"193.5.233.252", port"11778")
   )
 
   def run(args: List[String]): IO[ExitCode] = {
