@@ -10,8 +10,8 @@ import scala.concurrent.duration.DurationInt
 
 object Server extends IOApp {
 
-  case class PlayerInput(playerId: Int, action: String)
-  case class CarState(carId: Int, x: Double, y: Double, direction: Double)
+  case class PlayerInput(throttle: Double, steer: Double, drift: Boolean)
+  case class CarState(x: Double, y: Double, vx: Double, vy: Double, direction: Double)
 
   def tcpLobbyServer(port: Port): Stream[IO, Unit] = {
     // Stream of client sockets listening on the given port
@@ -59,13 +59,12 @@ object Server extends IOApp {
             map.updated(datagram.remote, System.currentTimeMillis())
           }
 
-          // Parse the message into a PlayerInput case class (simple protocol: "playerId,action")
-          val parts     = rawMsg.split(",", 2)
-          val inputObj  = if (parts.length == 2) {
-            val playerId = parts(0).toIntOption.getOrElse(-1)
-            PlayerInput(playerId, parts(1))
+          // Parse the message into a PlayerInput case class (simple protocol: "throttle;steer;drift")
+          val parts     = rawMsg.split(";", 3)
+          val inputObj  = if (parts.length == 3) {
+            PlayerInput(0.8, 0.2, true)
           } else {
-            PlayerInput(-1, rawMsg)  // fallback if format is unexpected
+            PlayerInput(0.4, 0.5, true)  // fallback if format is unexpected
           }
 
           //IO.println(s"UDP received: $inputObj")
@@ -80,7 +79,7 @@ object Server extends IOApp {
           // Stream that ticks approximately every 33ms (30 times per second)
           Stream.awakeEvery[IO](33.millis).evalMap { _ =>
               // Compute or retrieve the current CarState(s). Here we fabricate an example state:
-              val states = List[CarState](CarState(carId = 1, x = 12.34, y = 56.78, direction = 90.0))
+              val states = List[CarState](CarState(x = 12.34, y = 56.78, vx = 158, vy = 80, direction = 90.0))
               val outBytes = states.toString.getBytes(StandardCharsets.UTF_8)
               // Send the state to all client addresses
               clientRef.get.flatMap { clientMap =>
@@ -101,7 +100,7 @@ object Server extends IOApp {
 
   def cleanupInactiveClients(clientRef: Ref[IO, Map[SocketAddress[IpAddress], Long]]): Stream[IO, Unit] = {
     Stream.awakeEvery[IO](1.second).evalMap { _ =>
-      val cutoff = System.currentTimeMillis() - 1500
+      val cutoff = System.currentTimeMillis() - 2000
       clientRef.updateAndGet { currentMap =>
         currentMap.filter { case (_, lastSeen) => lastSeen >= cutoff }
       }.flatMap { newMap =>
