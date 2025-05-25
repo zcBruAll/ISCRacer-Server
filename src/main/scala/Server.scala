@@ -3,15 +3,29 @@ import cats.effect.{ExitCode, IO, IOApp, Ref}
 import com.comcast.ip4s.{IpAddress, IpLiteralSyntax, Port, SocketAddress}
 import fs2.io.net.{Datagram, Network, Socket}
 import cats.implicits.toFoldableOps
+import fs2.Chunk.ByteBuffer
 import fs2.{Chunk, Stream, text}
 
 import java.nio.charset.StandardCharsets
-import scala.concurrent.duration.DurationInt
+import java.util.UUID
+import scala.collection.mutable.ArrayBuffer
+import scala.concurrent.duration.{DurationInt, FiniteDuration}
 
 object Server extends IOApp {
 
-  case class PlayerInput(throttle: Double, steer: Double, drift: Boolean)
-  case class CarState(x: Double, y: Double, vx: Double, vy: Double, direction: Double)
+  case class Player(uuid: UUID, username: String)
+
+  case class PlayerState(segment: Int, segmentDist: Double, laps: Int, lapsDist : Double, lapTime: Long, totalTime: Long, bestLap: Long, lastLap: Long)
+
+  val defaultUUID = UUID.randomUUID()
+
+  val players = Ref.of[IO, ArrayBuffer[Player]](ArrayBuffer.empty[Player]).unsafeRunSync()
+  val playerInputs: Ref[IO, Map[UUID, PlayerInput]] = Ref.of[IO, Map[UUID, PlayerInput]](Map.empty).unsafeRunSync()
+  val playerStates = Ref.of[IO, Map[UUID, PlayerState]](Map.empty).unsafeRunSync()
+  val carStates: Ref[IO, Map[UUID, CarState]] = Ref.of[IO, Map[UUID, CarState]](Map(defaultUUID -> CarState(defaultUUID, 321, 456, -0.5, 0.4, math.toRadians(54)))).unsafeRunSync()
+
+  val tickDt: FiniteDuration = 33.millis
+  val dtSeconds: Double      = tickDt.toMillis.toDouble / 1000.0
 
   def tcpLobbyServer(port: Port): Stream[IO, Unit] = {
     // Stream of client sockets listening on the given port
@@ -19,9 +33,9 @@ object Server extends IOApp {
       // For each accepted client socket, create a Stream to handle it:
       .map { clientSocket: Socket[IO] =>
         // Log new connection (for demo purposes)
-        Stream.eval(IO.println(s"TCP client connected: ${clientSocket.remoteAddress}")) ++
+        Stream.eval(IO.println(s"[TCP] Client connected: ${clientSocket.remoteAddress.unsafeRunSync()}")) ++
           // Stream to periodically send lobby state to this client
-          Stream.awakeEvery[IO](5.seconds).evalMap { _ =>
+          Stream.awakeEvery[IO](1.seconds).evalMap { _ =>
               // (In a real app, compute or retrieve the current lobby state here)
               val lobbyUpdateMsg = "Lobby update: current lobby state...\n"
               clientSocket.write(Chunk.array(lobbyUpdateMsg.getBytes(StandardCharsets.UTF_8)))
@@ -30,16 +44,33 @@ object Server extends IOApp {
               // Concurrently, you could also listen for any messages from the client:
               clientSocket.reads                        // Stream of incoming bytes
                 .through(text.utf8.decode)              // decode bytes to String
-                .evalMap(msg => IO.println(s"Received from TCP client: $msg"))
+                .evalMap { msg =>
+                  msg.split(";") match {
+                    case Array(uuidStr, username) =>
+                      try {
+                        val uuid = UUID.fromString(uuidStr)
+                        players.update { currentPlayers =>
+                          currentPlayers += Player(uuid, username)
+                        }
+                        IO.println(s"[TCP] Player added: $uuid, $username")
+                      } catch {
+                        case e: Exception =>
+                          IO.println(s"[TCP] Error parsing player data: ${e.getMessage}")
+                      }
+                    case _ =>
+                      IO.println(s"[TCP] Invalid message format: $msg")
+                  }
+                  IO.println(s"Received: $msg")
+                }
                 .handleErrorWith(_ => Stream.empty)     // ignore errors (e.g. client disconnect)
                 .drain
             }
             .handleErrorWith { err =>  // Handle any errors (e.g. log and continue)
-              Stream.eval(IO.println(s"TCP error: ${err.getMessage}"))
+              Stream.eval(IO.println(s"[TCP] error: ${err.getMessage}"))
             }
             .onFinalize {
               // Cleanup when client disconnects
-              IO.println(s"TCP client disconnected: ${clientSocket.remoteAddress}")
+              IO.println(s"[TCP] Client disconnected: ${clientSocket.remoteAddress.unsafeRunSync()}")
             }
       }
       // Run all client streams in parallel (handle multiple clients concurrently)
@@ -52,48 +83,62 @@ object Server extends IOApp {
       // Process incoming UDP packets
       socket.reads   // Stream[IO, Datagram] of incoming packets
         .evalMap { datagram =>
-          // Decode the bytes to a string (assuming UTF-8 text for demo input)
-          val rawMsg    = new String(datagram.bytes.toArray, StandardCharsets.UTF_8).trim
+          val now = System.currentTimeMillis()
 
-          val registerClient = clientRef.update { map =>
-            map.updated(datagram.remote, System.currentTimeMillis())
-          }
+          val maybeInput = PlayerInput.decode(datagram.bytes.toArray)
 
-          // Parse the message into a PlayerInput case class (simple protocol: "throttle;steer;drift")
-          val parts     = rawMsg.split(";", 3)
-          val inputObj  = if (parts.length == 3) {
-            PlayerInput(0.8, 0.2, true)
-          } else {
-            PlayerInput(0.4, 0.5, true)  // fallback if format is unexpected
-          }
+          val updatePlayers: IO[Unit] =
+            maybeInput.traverse_(inp =>
+              playerInputs.update(_.updated(inp.uuid, inp)))
 
-          //IO.println(s"UDP received: $inputObj")
-          // Here we simply print the parsed input. In a real server, you might store this in game state.
-          registerClient *>
-            IO.println(s"Registered / Updated ${datagram.remote}") *>
-            IO.println(s"UDP received: $inputObj from ${datagram.remote}")
+          for {
+            // Always register / update the client timestamp
+            _ <- clientRef.update(_.updated(datagram.remote, now))
+
+            // Only update the PlayerInput map if decoding succeeded
+            _ <- updatePlayers
+
+            //_ <- IO.println(s"[UDP] Registered/Updated client ${datagram.remote} at $now")
+            _ <- maybeInput match {
+              case Some(inp) =>
+                IO.println(s"[UDP] Received valid input $inp from ${datagram.remote}")
+              case None =>
+                IO.println(s"[UDP] Ignored invalid packet from ${datagram.remote}")
+            }
+          } yield ()
         }
         .handleErrorWith { err =>  // Handle any errors (e.g. log and continue)
-          Stream.eval(IO.println(s"UDP input error: ${err.getMessage}"))
+          Stream.eval(IO.println(s"[UDP] Input error: ${err.getMessage}"))
         }.concurrently {
           // Stream that ticks approximately every 33ms (30 times per second)
           Stream.awakeEvery[IO](33.millis).evalMap { _ =>
-              // Compute or retrieve the current CarState(s). Here we fabricate an example state:
-              val states = List[CarState](CarState(x = 12.34, y = 56.78, vx = 158, vy = 80, direction = 90.0))
-              val outBytes = states.toString.getBytes(StandardCharsets.UTF_8)
-              // Send the state to all client addresses
-              clientRef.get.flatMap { clientMap =>
-                val clientList = clientMap.keys.toList
-                clientList.traverse_ { addr =>
-                  val datagram = Datagram(addr, Chunk.array(outBytes))
-                  IO.println(s"[Broadcast] Sending to $addr") *>
-                  socket.write(datagram)  // send the UDP packet to this address
+            for {
+              players <- players.get
+              clients <- clientRef.get
+              inputs <- playerInputs.get
+
+              _ <- carStates.update { oldStates =>
+                players.foldLeft(oldStates) { case (stateMap, player) =>
+                  val id = player.uuid
+                  val prevState = stateMap.getOrElse(id, CarState(id, 0, 0, 0, 0, 0))
+                  val input = inputs.getOrElse(id, PlayerInput(id, 0, 0, drift = false))
+                  val newState = CarState.physicStep(prevState, input, dtSeconds)
+                  stateMap.updated(id, newState)
                 }
               }
-            }
-            .handleErrorWith { err =>
-              Stream.eval(IO.println(s"UDP broadcast error: ${err.getMessage}"))
-            }
+
+              updatedStates <- carStates.get
+              payload = CarState.serializeCarStates(updatedStates)
+
+              _ <- clients.keys.toList.traverse_ { addr =>
+                socket.write(Datagram(addr, payload))
+
+              }
+            } yield ()
+          }
+          .handleErrorWith { err =>
+            Stream.eval(IO.println(s"[UDP] Broadcast error: ${err.getMessage}"))
+          }
         }
     }
   }
