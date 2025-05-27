@@ -3,23 +3,22 @@ import cats.effect.{ExitCode, IO, IOApp, Ref}
 import com.comcast.ip4s.{IpAddress, IpLiteralSyntax, Port, SocketAddress}
 import fs2.io.net.{Datagram, Network, Socket}
 import cats.implicits.toFoldableOps
-import fs2.Chunk.ByteBuffer
-import fs2.{Chunk, Stream, text}
+import fs2.{Chunk, Stream}
 
+import java.nio.{ByteBuffer, ByteOrder}
 import java.nio.charset.StandardCharsets
 import java.util.UUID
-import scala.collection.mutable.ArrayBuffer
 import scala.concurrent.duration.{DurationInt, FiniteDuration}
 
 object Server extends IOApp {
 
-  case class Player(uuid: UUID, username: String)
+  case class Player(uuid: UUID, username: String, var isReady: Boolean)
 
   case class PlayerState(segment: Int, segmentDist: Double, laps: Int, lapsDist : Double, lapTime: Long, totalTime: Long, bestLap: Long, lastLap: Long)
 
-  val defaultUUID = UUID.randomUUID()
+  val defaultUUID: UUID = UUID.randomUUID()
 
-  val players = Ref.of[IO, ArrayBuffer[Player]](ArrayBuffer.empty[Player]).unsafeRunSync()
+  val players: Ref[IO, Map[UUID, Player]] = Ref.of[IO, Map[UUID, Player]](Map.empty).unsafeRunSync()
   val playerInputs: Ref[IO, Map[UUID, PlayerInput]] = Ref.of[IO, Map[UUID, PlayerInput]](Map.empty).unsafeRunSync()
   val playerStates = Ref.of[IO, Map[UUID, PlayerState]](Map.empty).unsafeRunSync()
   val carStates: Ref[IO, Map[UUID, CarState]] = Ref.of[IO, Map[UUID, CarState]](Map(defaultUUID -> CarState(defaultUUID, 321, 456, -0.5, 0.4, math.toRadians(54)))).unsafeRunSync()
@@ -27,11 +26,19 @@ object Server extends IOApp {
   val tickDt: FiniteDuration = 33.millis
   val dtSeconds: Double      = tickDt.toMillis.toDouble / 1000.0
 
+  object MsgType extends Enumeration {
+    val Handshake: Byte = 0x01
+    val ReadyUpdate: Byte = 0x02
+  }
+
   def tcpLobbyServer(port: Port): Stream[IO, Unit] = {
     // Stream of client sockets listening on the given port
     Network[IO].server(address = None, port = Some(port))
       // For each accepted client socket, create a Stream to handle it:
       .map { clientSocket: Socket[IO] =>
+        var playerUuid: UUID = null
+        var player: Player = null
+
         // Log new connection (for demo purposes)
         Stream.eval(IO.println(s"[TCP] Client connected: ${clientSocket.remoteAddress.unsafeRunSync()}")) ++
           // Stream to periodically send lobby state to this client
@@ -41,35 +48,64 @@ object Server extends IOApp {
               clientSocket.write(Chunk.array(lobbyUpdateMsg.getBytes(StandardCharsets.UTF_8)))
             }
             .concurrently {
-              // Concurrently, you could also listen for any messages from the client:
-              clientSocket.reads                        // Stream of incoming bytes
-                .through(text.utf8.decode)              // decode bytes to String
-                .evalMap { msg =>
-                  msg.split(";") match {
-                    case Array(uuidStr, username) =>
-                      try {
-                        val uuid = UUID.fromString(uuidStr)
-                        players.update { currentPlayers =>
-                          currentPlayers += Player(uuid, username)
-                        }
-                        IO.println(s"[TCP] Player added: $uuid, $username")
-                      } catch {
-                        case e: Exception =>
-                          IO.println(s"[TCP] Error parsing player data: ${e.getMessage}")
-                      }
-                    case _ =>
-                      IO.println(s"[TCP] Invalid message format: $msg")
+              Stream
+                .repeatEval {
+                  // read the 2‐byte length header
+                  clientSocket.readN(2).map(_.toArray).flatMap { headerBytes =>
+                    val len = ByteBuffer
+                      .wrap(headerBytes)
+                      .order(ByteOrder.BIG_ENDIAN)
+                      .getShort & 0xffff
+
+                    // now read that many bytes of payload
+                    clientSocket.readN(len).map(_.toArray)
                   }
-                  IO.println(s"Received: $msg")
                 }
-                .handleErrorWith(_ => Stream.empty)     // ignore errors (e.g. client disconnect)
-                .drain
+                // once we have a full payload byte[], parse it and run the appropriate IO
+                .evalMap { payload =>
+                  val buf = ByteBuffer.wrap(payload).order(ByteOrder.BIG_ENDIAN)
+                  buf.get() match {
+                    case MsgType.Handshake =>
+                      val msb = buf.getLong
+                      val lsb = buf.getLong
+                      val uuid = new UUID(msb, lsb)
+                      playerUuid = uuid
+                      val nameLen = buf.get().toInt & 0xff
+                      val nameBytes = new Array[Byte](nameLen)
+                      buf.get(nameBytes)
+                      val username = new String(nameBytes, StandardCharsets.UTF_8)
+                      val p = Player(uuid, username, isReady = false)
+
+                      IO.println(s"Received HandShake: ${uuid.toString} - $username") >>
+                      players.update(_.updated(uuid, p))
+
+                    case MsgType.ReadyUpdate =>
+                      val msb   = buf.getLong
+                      val lsb   = buf.getLong
+                      val uuid  = new UUID(msb, lsb)
+                      val ready = buf.get() != 0
+
+                      IO.println(s"Received ReadyUpdate: ${uuid.toString} - is Ready? $ready") >>
+                      players.update { mp =>
+                        mp.get(uuid) match {
+                          case Some(old) => mp.updated(uuid, old.copy(isReady = ready))
+                          case None      => mp
+                        }
+                      }
+
+                    case _ =>
+                      IO.println(s"Received unknown message type: ${payload.toList}")
+                  }
+                }
             }
             .handleErrorWith { err =>  // Handle any errors (e.g. log and continue)
               Stream.eval(IO.println(s"[TCP] error: ${err.getMessage}"))
             }
             .onFinalize {
               // Cleanup when client disconnects
+              players.update { map =>
+                map.removed(playerUuid)
+              } >>
               IO.println(s"[TCP] Client disconnected: ${clientSocket.remoteAddress.unsafeRunSync()}")
             }
       }
@@ -111,28 +147,24 @@ object Server extends IOApp {
           Stream.eval(IO.println(s"[UDP] Input error: ${err.getMessage}"))
         }.concurrently {
           // Stream that ticks approximately every 33ms (30 times per second)
-          Stream.awakeEvery[IO](33.millis).evalMap { _ =>
+          Stream.awakeEvery[IO](33.millis).evalFilter(_ => arePlayersReady()).evalMap { _ =>
             for {
               players <- players.get
               clients <- clientRef.get
               inputs <- playerInputs.get
+              oldStates <- carStates.get
 
-              _ <- carStates.update { oldStates =>
-                players.foldLeft(oldStates) { case (stateMap, player) =>
-                  val id = player.uuid
-                  val prevState = stateMap.getOrElse(id, CarState(id, 0, 0, 0, 0, 0))
-                  val input = inputs.getOrElse(id, PlayerInput(id, 0, 0, drift = false))
-                  val newState = CarState.physicStep(prevState, input, dtSeconds)
-                  stateMap.updated(id, newState)
-                }
+              updatedStates = players.map { case (id, player) =>
+                val prevState = oldStates.getOrElse(id, CarState(id, 0, 0, 0, 0, 0))
+                val input = inputs.getOrElse(id, PlayerInput(id, 0, 0, drift = false))
+                id -> CarState.physicStep(prevState, input, dtSeconds)
               }
 
-              updatedStates <- carStates.get
+              _ <- carStates.set(updatedStates)
               payload = CarState.serializeCarStates(updatedStates)
 
               _ <- clients.keys.toList.traverse_ { addr =>
                 socket.write(Datagram(addr, payload))
-
               }
             } yield ()
           }
@@ -151,6 +183,13 @@ object Server extends IOApp {
       }.flatMap { newMap =>
         IO.println(s"[Cleanup] Active clients: ${newMap.keys.toList}")
       }
+    }
+  }
+
+  def arePlayersReady(): IO[Boolean] = {
+    players.get.map { m =>
+      // if you want to treat “no players” as “not ready”, you could also check m.nonEmpty
+      m.values.forall(_.isReady)
     }
   }
 
