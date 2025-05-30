@@ -28,6 +28,8 @@ object Server extends IOApp {
   object MsgType extends Enumeration {
     val Handshake: Byte = 0x01
     val ReadyUpdate: Byte = 0x02
+    val LobbyUpdate: Byte = 0x03
+    val gameStart: Byte = 0x04
   }
 
   def tcpLobbyServer(port: Port): Stream[IO, Unit] = {
@@ -39,7 +41,7 @@ object Server extends IOApp {
 
         Stream.eval(IO.println(s"[TCP] Client connected: ${clientSocket.remoteAddress.unsafeRunSync()}")) ++
           // Stream to periodically send lobby state to this client
-          Stream.awakeEvery[IO](1.seconds).evalMap { _ =>
+          Stream.awakeEvery[IO](500.millis).evalMap { _ =>
               clientSocket.write(LobbyState.serializeState(players.get.unsafeRunSync()))
             }
             .concurrently {
