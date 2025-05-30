@@ -1,3 +1,4 @@
+import LobbyState.{Player, arePlayersReady}
 import cats.effect.unsafe.implicits.global
 import cats.effect.{ExitCode, IO, IOApp, Ref}
 import com.comcast.ip4s.{IpAddress, IpLiteralSyntax, Port, SocketAddress}
@@ -11,8 +12,6 @@ import java.util.UUID
 import scala.concurrent.duration.{DurationInt, FiniteDuration}
 
 object Server extends IOApp {
-
-  case class Player(uuid: UUID, username: String, var isReady: Boolean)
 
   case class PlayerState(segment: Int, segmentDist: Double, laps: Int, lapsDist : Double, lapTime: Long, totalTime: Long, bestLap: Long, lastLap: Long)
 
@@ -37,15 +36,11 @@ object Server extends IOApp {
       // For each accepted client socket, create a Stream to handle it:
       .map { clientSocket: Socket[IO] =>
         var playerUuid: UUID = null
-        var player: Player = null
 
-        // Log new connection (for demo purposes)
         Stream.eval(IO.println(s"[TCP] Client connected: ${clientSocket.remoteAddress.unsafeRunSync()}")) ++
           // Stream to periodically send lobby state to this client
           Stream.awakeEvery[IO](1.seconds).evalMap { _ =>
-              // (In a real app, compute or retrieve the current lobby state here)
-              val lobbyUpdateMsg = "Lobby update: current lobby state...\n"
-              clientSocket.write(Chunk.array(lobbyUpdateMsg.getBytes(StandardCharsets.UTF_8)))
+              clientSocket.write(LobbyState.serializeState(players.get.unsafeRunSync()))
             }
             .concurrently {
               Stream
@@ -76,7 +71,7 @@ object Server extends IOApp {
                       val username = new String(nameBytes, StandardCharsets.UTF_8)
                       val p = Player(uuid, username, isReady = false)
 
-                      IO.println(s"Received HandShake: ${uuid.toString} - $username") >>
+                      IO.println(s"[TCP] Received HandShake: ${uuid.toString} - $username") >>
                       players.update(_.updated(uuid, p))
 
                     case MsgType.ReadyUpdate =>
@@ -85,7 +80,7 @@ object Server extends IOApp {
                       val uuid  = new UUID(msb, lsb)
                       val ready = buf.get() != 0
 
-                      IO.println(s"Received ReadyUpdate: ${uuid.toString} - is Ready? $ready") >>
+                      IO.println(s"[TCP] Received ReadyUpdate: ${uuid.toString} - is Ready? $ready") >>
                       players.update { mp =>
                         mp.get(uuid) match {
                           case Some(old) => mp.updated(uuid, old.copy(isReady = ready))
@@ -94,7 +89,7 @@ object Server extends IOApp {
                       }
 
                     case _ =>
-                      IO.println(s"Received unknown message type: ${payload.toList}")
+                      IO.println(s"[TCP] Received unknown message type: ${payload.toList}")
                   }
                 }
             }
@@ -147,7 +142,7 @@ object Server extends IOApp {
           Stream.eval(IO.println(s"[UDP] Input error: ${err.getMessage}"))
         }.concurrently {
           // Stream that ticks approximately every 33ms (30 times per second)
-          Stream.awakeEvery[IO](33.millis).evalFilter(_ => arePlayersReady()).evalMap { _ =>
+          Stream.awakeEvery[IO](33.millis).evalFilter(_ => arePlayersReady(players)).evalMap { _ =>
             for {
               players <- players.get
               clients <- clientRef.get
@@ -186,12 +181,7 @@ object Server extends IOApp {
     }
   }
 
-  def arePlayersReady(): IO[Boolean] = {
-    players.get.map { m =>
-      // if you want to treat “no players” as “not ready”, you could also check m.nonEmpty
-      m.values.forall(_.isReady)
-    }
-  }
+
 
   def run(args: List[String]): IO[ExitCode] = {
     // Define the ports to use
