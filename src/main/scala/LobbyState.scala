@@ -1,16 +1,23 @@
 import cats.effect.{IO, Ref}
 import fs2.Chunk
+import fs2.io.net.Socket
 
 import java.nio.charset.StandardCharsets
 import java.nio.{ByteBuffer, ByteOrder}
 import java.util.UUID
 
 object LobbyState {
-  case class Player(uuid: UUID, username: String, var isReady: Boolean)
+  case class Player(uuid: UUID, socket: Socket[IO], username: String, var isReady: Boolean, var isReadyToStart : Boolean = false)
 
   var timeStart: Long = 0//System.currentTimeMillis()
 
   def serializeState(players: Map[UUID, Player]): Chunk[Byte] = {
+    val temp = System.currentTimeMillis()
+    if (timeStart != 0 && timeStart - temp <= 0 && !GameState.initiated) {
+      println("[TCP] Serializing Game state")
+      return GameState.serializeGameStart()
+    }
+
     val count = players.size
     val nbReady  = nbPlayersReady(players)
 
@@ -24,14 +31,10 @@ object LobbyState {
     buf.put(Server.MsgType.LobbyUpdate)
     buf.putShort(count.toShort)
     buf.putShort(nbReady.toShort)
-    val temp = System.currentTimeMillis()
     buf.putShort(if (nbReady == count) {
-      if (timeStart == 0) {
+      if (timeStart == 0)
         timeStart = temp + 10_000
-        ((timeStart - temp) / 1000).toShort
-      } else if (timeStart - temp >= 0)
-        ((timeStart - temp) / 1000).toShort
-      else 0
+      ((timeStart - temp) / 1000).toShort
     }
     else {
       timeStart = 0

@@ -1,4 +1,5 @@
-import LobbyState.{Player, arePlayersReady}
+import GameState.{PlayerState, gameStarted, initiated}
+import LobbyState.Player
 import cats.effect.unsafe.implicits.global
 import cats.effect.{ExitCode, IO, IOApp, Ref}
 import com.comcast.ip4s.{IpAddress, IpLiteralSyntax, Port, SocketAddress}
@@ -12,8 +13,6 @@ import java.util.UUID
 import scala.concurrent.duration.{DurationInt, FiniteDuration}
 
 object Server extends IOApp {
-
-  case class PlayerState(segment: Int, segmentDist: Double, laps: Int, lapsDist : Double, lapTime: Long, totalTime: Long, bestLap: Long, lastLap: Long)
 
   val defaultUUID: UUID = UUID.randomUUID()
 
@@ -29,7 +28,16 @@ object Server extends IOApp {
     val Handshake: Byte = 0x01
     val ReadyUpdate: Byte = 0x02
     val LobbyUpdate: Byte = 0x03
-    val gameStart: Byte = 0x04
+    val GameInit: Byte = 0x04
+    val GameStart: Byte = 0x05
+  }
+
+  def broadcastToAllSockets(payload: Chunk[Byte]): IO[Unit] = {
+    for {
+      _ <- players.get.unsafeRunSync().values.toList.traverse_ { entry =>
+        entry.socket.write(payload)
+      }
+    } yield ()
   }
 
   def tcpLobbyServer(port: Port): Stream[IO, Unit] = {
@@ -42,7 +50,10 @@ object Server extends IOApp {
         Stream.eval(IO.println(s"[TCP] Client connected: ${clientSocket.remoteAddress.unsafeRunSync()}")) ++
           // Stream to periodically send lobby state to this client
           Stream.awakeEvery[IO](500.millis).evalMap { _ =>
-              clientSocket.write(LobbyState.serializeState(players.get.unsafeRunSync()))
+              if (!gameStarted && !initiated)
+                broadcastToAllSockets(LobbyState.serializeState(players.get.unsafeRunSync()))
+              else
+                broadcastToAllSockets(GameState.sendGameTimer())
             }
             .concurrently {
               Stream
@@ -71,7 +82,7 @@ object Server extends IOApp {
                       val nameBytes = new Array[Byte](nameLen)
                       buf.get(nameBytes)
                       val username = new String(nameBytes, StandardCharsets.UTF_8)
-                      val p = Player(uuid, username, isReady = false)
+                      val p = Player(uuid, clientSocket, username, isReady = false)
 
                       IO.println(s"[TCP] Received HandShake: ${uuid.toString} - $username") >>
                       players.update(_.updated(uuid, p))
@@ -90,6 +101,18 @@ object Server extends IOApp {
                         }
                       }
 
+                    case MsgType.GameStart =>
+                      val msb = buf.getLong
+                      val lsb = buf.getLong
+                      val uuid = new UUID(msb, lsb)
+                      val ready = buf.get() != 0
+                      IO.println(s"[TCP] Received GameReadyUpdate: ${uuid.toString} - isReady? $ready") >>
+                      players.update {mp =>
+                        mp.get(uuid) match {
+                          case Some(old) => mp.updated(uuid, old.copy(isReadyToStart = ready))
+                          case None => mp
+                        }
+                      }
                     case _ =>
                       IO.println(s"[TCP] Received unknown message type: ${payload.toList}")
                   }
@@ -99,6 +122,7 @@ object Server extends IOApp {
               Stream.eval(IO.println(s"[TCP] error: ${err.getMessage}"))
             }
             .onFinalize {
+              if (players.get.unsafeRunSync().isEmpty) GameState.resetGame()
               // Cleanup when client disconnects
               players.update { map =>
                 map.removed(playerUuid)
@@ -144,14 +168,14 @@ object Server extends IOApp {
           Stream.eval(IO.println(s"[UDP] Input error: ${err.getMessage}"))
         }.concurrently {
           // Stream that ticks approximately every 33ms (30 times per second)
-          Stream.awakeEvery[IO](33.millis).evalFilter(_ => arePlayersReady(players)).evalMap { _ =>
+          Stream.awakeEvery[IO](33.millis).evalFilter(_ => GameState.arePlayersReady(players)).evalMap { _ =>
             for {
               players <- players.get
               clients <- clientRef.get
               inputs <- playerInputs.get
               oldStates <- carStates.get
 
-              updatedStates = players.map { case (id, player) =>
+              updatedStates = players.map { case (id, _) =>
                 val prevState = oldStates.getOrElse(id, CarState(id, 0, 0, 0, 0, 0))
                 val input = inputs.getOrElse(id, PlayerInput(id, 0, 0, drift = false))
                 id -> CarState.physicStep(prevState, input, dtSeconds)
