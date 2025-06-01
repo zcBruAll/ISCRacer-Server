@@ -15,7 +15,7 @@ object PlayerInput {
   def decode(bytes: Array[Byte]): Option[PlayerInput] = {
     if (bytes.length < PacketSize) return None
 
-    val bb = ByteBuffer.wrap(bytes).order(ByteOrder.LITTLE_ENDIAN)
+    val bb = ByteBuffer.wrap(bytes).order(ByteOrder.BIG_ENDIAN)
 
     val msb = bb.getLong
     val lsb = bb.getLong
@@ -24,7 +24,7 @@ object PlayerInput {
     val throttle = bb.getFloat
     val steer = bb.getFloat
 
-    val drift = (bb.get() != 0)
+    val drift = bb.get() != 0
 
     if (throttle < -1f || throttle > 1f) return None
     if (steer < -1f || steer > 1f) return None

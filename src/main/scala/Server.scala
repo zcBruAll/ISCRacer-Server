@@ -176,7 +176,8 @@ object Server extends IOApp {
               oldStates <- carStates.get
 
               updatedStates = players.map { case (id, _) =>
-                val prevState = oldStates.getOrElse(id, CarState(id, 0, 0, 0, 0, 0))
+                val cp0 = GameState.getCP0
+                val prevState = oldStates.getOrElse(id, CarState(id, cp0.x, cp0.y, 0, 0, 0))
                 val input = inputs.getOrElse(id, PlayerInput(id, 0, 0, drift = false))
                 id -> CarState.physicStep(prevState, input, dtSeconds)
               }

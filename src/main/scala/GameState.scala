@@ -22,6 +22,8 @@ object GameState {
   def gameStarted: Boolean = _gameStarted
   def gameTime: Long = _gameTime
 
+  def getCP0: Checkpoint = cpList.head
+
   def arePlayersReady(players: Ref[IO, Map[UUID, Player]]): IO[Boolean] = {
     players.get.map { m =>
       m.nonEmpty && m.values.forall(_.isReadyToStart)
@@ -49,7 +51,7 @@ object GameState {
     val y0 = cpList.head.y
     val x1 = cpList(1).x
     val y1 = cpList(1).y
-    val direction = math.atan2(x1 - x0, y1 - y0).toFloat
+    val direction = Math.atan2(y1 - y0, x1 - x0).toFloat
 
     println(direction)
 
