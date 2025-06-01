@@ -1,4 +1,4 @@
-import GameState.{PlayerState, gameStarted, initiated}
+import GameState.{PlayerState, gameRunning, gameStarted, initiated}
 import LobbyState.Player
 import cats.effect.unsafe.implicits.global
 import cats.effect.{ExitCode, IO, IOApp, Ref}
@@ -34,8 +34,10 @@ object Server extends IOApp {
 
   def broadcastToAllSockets(payload: Chunk[Byte]): IO[Unit] = {
     for {
-      _ <- players.get.unsafeRunSync().values.toList.traverse_ { entry =>
-        entry.socket.write(payload)
+      _ <- players.get.flatMap { playerMap =>
+        playerMap.values.toList.traverse_ { entry =>
+          entry.socket.write(payload)
+        }
       }
     } yield ()
   }
@@ -50,10 +52,14 @@ object Server extends IOApp {
         Stream.eval(IO.println(s"[TCP] Client connected: ${clientSocket.remoteAddress.unsafeRunSync()}")) ++
           // Stream to periodically send lobby state to this client
           Stream.awakeEvery[IO](500.millis).evalMap { _ =>
-              if (!gameStarted && !initiated)
-                broadcastToAllSockets(LobbyState.serializeState(players.get.unsafeRunSync()))
-              else
-                broadcastToAllSockets(GameState.sendGameTimer())
+            for {
+              _ <-
+                if (!gameStarted && !initiated) {
+                  broadcastToAllSockets(LobbyState.serializeState(players.get.unsafeRunSync()))
+                } else if (!gameRunning) {
+                  broadcastToAllSockets(GameState.sendGameTimer())
+                } else IO.unit
+            } yield ()
             }
             .concurrently {
               Stream
@@ -107,10 +113,10 @@ object Server extends IOApp {
                       val uuid = new UUID(msb, lsb)
                       val ready = buf.get() != 0
                       IO.println(s"[TCP] Received GameReadyUpdate: ${uuid.toString} - isReady? $ready") >>
-                      players.update {mp =>
+                      players.update { mp =>
                         mp.get(uuid) match {
                           case Some(old) => mp.updated(uuid, old.copy(isReadyToStart = ready))
-                          case None => mp
+                          case None      => mp
                         }
                       }
                     case _ =>

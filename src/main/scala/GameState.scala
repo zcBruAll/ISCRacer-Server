@@ -15,12 +15,14 @@ object GameState {
 
   private var _gameStarted : Boolean = false
   private var _gameTime : Long = 0
+  private var _gameRunning: Boolean = false
 
   private var _initiated: Boolean = false
   def initiated: Boolean = _initiated
 
   def gameStarted: Boolean = _gameStarted
   def gameTime: Long = _gameTime
+  def gameRunning: Boolean = _gameRunning
 
   def getCP0: Checkpoint = cpList.head
 
@@ -40,6 +42,7 @@ object GameState {
     _initiated = false
     _gameStarted = false
     _gameTime = 0
+    _gameRunning = false
   }
 
   def serializeGameStart(): Chunk[Byte] = {
@@ -53,9 +56,7 @@ object GameState {
     val y1 = cpList(1).y
     val direction = Math.atan2(y1 - y0, x1 - x0).toFloat
 
-    println(direction)
-
-    val recordSize = 1 + 1 + 2 + map.length + 2 + 2 + 4
+    val recordSize = 1 + 1 + map.length + 2 + 2 + 4
     val bufferSize = 2 + recordSize
 
     // record ; type ; map name length ; map name ; start x ; start y ; start direction
@@ -87,7 +88,9 @@ object GameState {
 
     buf.putShort(recordSize.toShort)
     buf.put(Server.MsgType.GameStart)
-    buf.putShort(((gameTime - System.currentTimeMillis()) / 1000).toShort)
+    val timer = (gameTime - System.currentTimeMillis()) / 1000
+    if (timer <= -1) _gameRunning = true
+    buf.putShort(math.max(-1, timer).toShort)
 
     buf.flip()
 

@@ -14,7 +14,6 @@ object LobbyState {
   def serializeState(players: Map[UUID, Player]): Chunk[Byte] = {
     val temp = System.currentTimeMillis()
     if (timeStart != 0 && timeStart - temp <= 0 && !GameState.initiated) {
-      println("[TCP] Serializing Game state")
       return GameState.serializeGameStart()
     }
 
