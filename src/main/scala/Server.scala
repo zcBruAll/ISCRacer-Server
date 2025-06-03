@@ -1,4 +1,4 @@
-import GameState.{PlayerState, gameRunning, gameStarted, initiated}
+import GameState.{gameRunning, gameStarted, initiated}
 import LobbyState.Player
 import cats.effect.unsafe.implicits.global
 import cats.effect.{ExitCode, IO, IOApp, Ref}
@@ -18,18 +18,21 @@ object Server extends IOApp {
 
   val players: Ref[IO, Map[UUID, Player]] = Ref.of[IO, Map[UUID, Player]](Map.empty).unsafeRunSync()
   val playerInputs: Ref[IO, Map[UUID, PlayerInput]] = Ref.of[IO, Map[UUID, PlayerInput]](Map.empty).unsafeRunSync()
-  val playerStates = Ref.of[IO, Map[UUID, PlayerState]](Map.empty).unsafeRunSync()
+  val playerStates: Ref[IO, Map[UUID, PlayerState]] = Ref.of[IO, Map[UUID, PlayerState]](Map.empty).unsafeRunSync()
   val carStates: Ref[IO, Map[UUID, CarState]] = Ref.of[IO, Map[UUID, CarState]](Map(defaultUUID -> CarState(defaultUUID, 321, 456, -0.5, 0.4, math.toRadians(54)))).unsafeRunSync()
 
-  val tickDt: FiniteDuration = 33.millis
+  val tickDt: FiniteDuration = 12.millis
   val dtSeconds: Double      = tickDt.toMillis.toDouble / 1000.0
 
-  object MsgType extends Enumeration {
+  object MsgType {
     val Handshake: Byte = 0x01
     val ReadyUpdate: Byte = 0x02
     val LobbyUpdate: Byte = 0x03
     val GameInit: Byte = 0x04
     val GameStart: Byte = 0x05
+    val CarState: Byte = 0x11
+    val PlayerInput: Byte = 0x12
+    val PlayerState: Byte = 0x13
   }
 
   def broadcastToAllSockets(payload: Chunk[Byte]): IO[Unit] = {
@@ -174,22 +177,31 @@ object Server extends IOApp {
           Stream.eval(IO.println(s"[UDP] Input error: ${err.getMessage}"))
         }.concurrently {
           // Stream that ticks approximately every 33ms (30 times per second)
-          Stream.awakeEvery[IO](33.millis).evalFilter(_ => GameState.arePlayersReady(players)).evalMap { _ =>
+          Stream.awakeEvery[IO](tickDt).evalFilter(_ => GameState.arePlayersReady(players)).evalMap { _ =>
             for {
               players <- players.get
               clients <- clientRef.get
               inputs <- playerInputs.get
-              oldStates <- carStates.get
+              oldCarStates <- carStates.get
+              oldPlayersStates <- playerStates.get
 
-              updatedStates = players.map { case (id, _) =>
+              updatedCarStates = players.map { case (id, _) =>
                 val cp0 = GameState.getCP0
-                val prevState = oldStates.getOrElse(id, CarState(id, cp0.x, cp0.y, 0, 0, 0))
+                val prevState = oldCarStates.getOrElse(id, CarState(id, cp0.x, cp0.y, 0, 0, 0))
                 val input = inputs.getOrElse(id, PlayerInput(id, 0, 0, drift = false))
                 id -> CarState.physicStep(prevState, input, dtSeconds)
               }
 
-              _ <- carStates.set(updatedStates)
-              payload = CarState.serializeCarStates(updatedStates)
+              updatePlayerState = players.map { case (id, _) =>
+                val cp0 = GameState.getCP0
+                val carState = oldCarStates.getOrElse(id, CarState(id, cp0.x, cp0.y, 0, 0, 0))
+                val prevPlayerState = oldPlayersStates.getOrElse(id, PlayerState(id, System.currentTimeMillis(), 0, 0f, 0, 0f, 0L, 0L, 0L, 0L))
+                id -> PlayerState.distanceStep(prevPlayerState, carState)
+              }
+
+              _ <- carStates.set(updatedCarStates)
+              _ <- playerStates.set(updatePlayerState)
+              payload = CarState.serializeCarStates(updatedCarStates)
 
               _ <- clients.keys.toList.traverse_ { addr =>
                 socket.write(Datagram(addr, payload))
@@ -199,6 +211,21 @@ object Server extends IOApp {
           .handleErrorWith { err =>
             Stream.eval(IO.println(s"[UDP] Broadcast error: ${err.getMessage}"))
           }
+        }.concurrently {
+          // Stream that ticks approximately every 33ms (30 times per second)
+          Stream.awakeEvery[IO](33.millis).evalFilter(_ => GameState.arePlayersReady(players)).evalMap { _ =>
+              for {
+                states <- playerStates.get
+                clients <- clientRef.get
+
+                _ <- clients.keys.toList.traverse_ { addr =>
+                  socket.write(Datagram(addr, PlayerState.serializePlayerState(states)))
+                }
+              } yield ()
+            }
+            .handleErrorWith { err =>
+              Stream.eval(IO.println(s"[UDP] Broadcast error: ${err.getMessage}"))
+            }
         }
     }
   }

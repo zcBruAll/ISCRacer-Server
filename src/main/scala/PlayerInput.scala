@@ -1,12 +1,7 @@
 import java.nio.{ByteBuffer, ByteOrder}
 import java.util.UUID
 
-case class PlayerInput (
-                       uuid: UUID,
-                       throttle: Float,
-                       steer: Float,
-                       drift: Boolean
-                       )
+case class PlayerInput (uuid: UUID,throttle: Float,steer: Float,drift: Boolean)
 
 object PlayerInput {
   // Packet size: 16 (UUID) + 4 (throttle) + 4 (steer) + 1 (drift)

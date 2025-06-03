@@ -1,4 +1,5 @@
 import LobbyState.{Player, timeStart}
+import cats.effect.unsafe.implicits.global
 import cats.effect.{IO, Ref}
 import fs2.Chunk
 
@@ -7,11 +8,13 @@ import java.util.UUID
 import scala.io.Source
 
 object GameState {
-  case class PlayerState(segment: Int, segmentDist: Double, laps: Int, lapsDist : Double, lapTime: Long, totalTime: Long, bestLap: Long, lastLap: Long)
-
   case class Checkpoint(x: Int, y: Int)
 
   private var cpList: List[Checkpoint] = _
+  private var _segmentLength: Array[Float] = _
+  private var _cumulativeDistances: Array[Float] = _
+  def segmentLengths: Array[Float] = _segmentLength
+  def cumulativeDistances: Array[Float] = _cumulativeDistances
 
   private var _gameStarted : Boolean = false
   private var _gameTime : Long = 0
@@ -25,6 +28,7 @@ object GameState {
   def gameRunning: Boolean = _gameRunning
 
   def getCP0: Checkpoint = cpList.head
+  def getCPList: List[Checkpoint] = cpList
 
   def arePlayersReady(players: Ref[IO, Map[UUID, Player]]): IO[Boolean] = {
     players.get.map { m =>
@@ -49,6 +53,16 @@ object GameState {
     val map = "map_1"
 
     cpList = initCP(map)
+
+    _segmentLength = cpList
+      .sliding(2)
+      .map { case List(a, b) =>
+        val dx = b.x - a.x
+        val dy = b.y - a.y
+        math.sqrt(dx * dx + dy * dy).toFloat
+      }.toArray
+
+    _cumulativeDistances = _segmentLength.scanLeft(0f)(_ + _)
 
     val x0 = cpList.head.x
     val y0 = cpList.head.y
@@ -78,8 +92,6 @@ object GameState {
   }
 
   def sendGameTimer(): Chunk[Byte] = {
-    if (!gameStarted) startGame()
-
     val recordSize = 1 + 2
     val bufferSize = 2 + recordSize
 
@@ -88,7 +100,13 @@ object GameState {
 
     buf.putShort(recordSize.toShort)
     buf.put(Server.MsgType.GameStart)
-    val timer = (gameTime - System.currentTimeMillis()) / 1000
+
+    val now = System.currentTimeMillis()
+
+    if (!gameStarted && !arePlayersReady(Server.players).unsafeRunSync()) _gameTime = now + 99_000
+    else if (!gameStarted) startGame()
+
+    val timer = (gameTime - now) / 1000
     if (timer <= -1) _gameRunning = true
     buf.putShort(math.max(-1, timer).toShort)
 
@@ -98,8 +116,7 @@ object GameState {
   }
 
   private def initCP(map: String): List[Checkpoint] = {
-    val file = s"src/main/resources/map/tracks/$map/points.json"
-    val source = Source.fromFile(file)
+    val source = Source.fromResource(s"map/tracks/$map/points.json")("UTF-8")
     val content = try source.mkString finally source.close()
 
     val pointsPattern = "\\{\\s*\"x\"\\s*:\\s*(\\d+(\\.\\d+)?),\\s*\"y\"\\s*:\\s*(\\d+(\\.\\d+)?)\\s*}".r
