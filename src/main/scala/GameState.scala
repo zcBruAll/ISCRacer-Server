@@ -8,13 +8,8 @@ import java.util.UUID
 import scala.io.Source
 
 object GameState {
-  case class Checkpoint(x: Int, y: Int)
-
-  private var cpList: List[Checkpoint] = _
-  private var _segmentLength: Array[Float] = _
-  private var _cumulativeDistances: Array[Float] = _
-  def segmentLengths: Array[Float] = _segmentLength
-  def cumulativeDistances: Array[Float] = _cumulativeDistances
+  private var _track: Track = _
+  def track: Track = _track
 
   private var _gameStarted : Boolean = false
   private var _gameTime : Long = 0
@@ -26,9 +21,6 @@ object GameState {
   def gameStarted: Boolean = _gameStarted
   def gameTime: Long = _gameTime
   def gameRunning: Boolean = _gameRunning
-
-  def getCP0: Checkpoint = cpList.head
-  def getCPList: List[Checkpoint] = cpList
 
   def arePlayersReady(players: Ref[IO, Map[UUID, Player]]): IO[Boolean] = {
     players.get.map { m =>
@@ -52,22 +44,12 @@ object GameState {
   def serializeGameStart(): Chunk[Byte] = {
     val map = "map_1"
 
-    cpList = initCP(map)
+    _track = new Track(initCP(map))
 
-    _segmentLength = cpList
-      .sliding(2)
-      .map { case List(a, b) =>
-        val dx = b.x - a.x
-        val dy = b.y - a.y
-        math.sqrt(dx * dx + dy * dy).toFloat
-      }.toArray
-
-    _cumulativeDistances = _segmentLength.scanLeft(0f)(_ + _)
-
-    val x0 = cpList.head.x
-    val y0 = cpList.head.y
-    val x1 = cpList(1).x
-    val y1 = cpList(1).y
+    val x0 = track.points(0).x
+    val y0 = track.points(0).y
+    val x1 = track.points(track.next(0)).x
+    val y1 = track.points(track.next(0)).y
     val direction = Math.atan2(y1 - y0, x1 - x0).toFloat
 
     val recordSize = 1 + 1 + map.length + 2 + 2 + 4
@@ -115,7 +97,7 @@ object GameState {
     Chunk.byteBuffer(buf)
   }
 
-  private def initCP(map: String): List[Checkpoint] = {
+  private def initCP(map: String): IndexedSeq[Vec2] = {
     val source = Source.fromResource(s"map/tracks/$map/points.json")("UTF-8")
     val content = try source.mkString finally source.close()
 
@@ -124,9 +106,9 @@ object GameState {
     val points = pointsPattern.findAllIn(content).matchData.map { m =>
       val x = m.group(1).toInt
       val y = m.group(3).toInt
-      Checkpoint(x, y)
-    }.toList
+      Vec2(x, y)
+    }.toIndexedSeq
 
-    if (points.nonEmpty) points :+ points.head else points
+    points
   }
 }

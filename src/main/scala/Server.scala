@@ -167,7 +167,7 @@ object Server extends IOApp {
             //_ <- IO.println(s"[UDP] Registered/Updated client ${datagram.remote} at $now")
             _ <- maybeInput match {
               case Some(inp) =>
-                IO.println(s"[UDP] Received valid input $inp from ${datagram.remote}")
+                IO.unit//println(s"[UDP] Received valid input $inp from ${datagram.remote}")
               case None =>
                 IO.println(s"[UDP] Ignored invalid packet from ${datagram.remote}")
             }
@@ -186,18 +186,20 @@ object Server extends IOApp {
               oldPlayersStates <- playerStates.get
 
               updatedCarStates = players.map { case (id, _) =>
-                val cp0 = GameState.getCP0
+                val cp0 = GameState.track.points.head
                 val prevState = oldCarStates.getOrElse(id, CarState(id, cp0.x, cp0.y, 0, 0, 0))
                 val input = inputs.getOrElse(id, PlayerInput(id, 0, 0, drift = false))
                 id -> CarState.physicStep(prevState, input, dtSeconds)
               }
 
-              updatePlayerState = players.map { case (id, _) =>
-                val cp0 = GameState.getCP0
-                val carState = oldCarStates.getOrElse(id, CarState(id, cp0.x, cp0.y, 0, 0, 0))
-                val prevPlayerState = oldPlayersStates.getOrElse(id, PlayerState(id, System.currentTimeMillis(), 0, 0f, 0, 0f, 0L, 0L, 0L, 0L))
-                id -> PlayerState.distanceStep(prevPlayerState, carState)
-              }
+              updatePlayerState =
+                if (GameState.gameTime - 750 <= System.currentTimeMillis()) players.map { case (id, player) =>
+                  val cp0 = GameState.track.points.head
+                  val carState = oldCarStates.getOrElse(id, CarState(id, cp0.x, cp0.y, 0, 0, 0))
+                  val prevPlayerState = oldPlayersStates.getOrElse(id, PlayerState(id, player.username, System.currentTimeMillis(), 0, 0f, 0, 0f, 0L, 0L, 0L, 0L))
+                  id -> PlayerState.distanceStep(prevPlayerState, carState, GameState.track)
+                }
+                else Map.empty[UUID, PlayerState]
 
               _ <- carStates.set(updatedCarStates)
               _ <- playerStates.set(updatePlayerState)
@@ -240,8 +242,6 @@ object Server extends IOApp {
       }
     }
   }
-
-
 
   def run(args: List[String]): IO[ExitCode] = {
     // Define the ports to use
