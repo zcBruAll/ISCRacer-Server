@@ -18,7 +18,7 @@ object LobbyState {
     }
 
     val count = players.size
-    val nbReady  = nbPlayersReady(players)
+    val nbReady = nbPlayersReady(players)
 
     val recordSize = 2 + 1 + 2 + 2 + players.values.map(_.username.length).sum + (count * 2)
     val bufferSize = 2 + recordSize

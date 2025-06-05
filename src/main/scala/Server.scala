@@ -1,7 +1,8 @@
-import GameState.{gameRunning, gameStarted, initiated}
+import GameState.{gameRunning, gameStarted, gameTime, initiated}
 import LobbyState.Player
+import PlayerState.{arePlayersDone, isPlayerDone}
 import cats.effect.unsafe.implicits.global
-import cats.effect.{ExitCode, IO, IOApp, Ref}
+import cats.effect.{ExitCode, IO, IOApp, Ref, Sync}
 import com.comcast.ip4s.{IpAddress, IpLiteralSyntax, Port, SocketAddress}
 import fs2.io.net.{Datagram, Network, Socket}
 import cats.implicits.toFoldableOps
@@ -30,6 +31,7 @@ object Server extends IOApp {
     val LobbyUpdate: Byte = 0x03
     val GameInit: Byte = 0x04
     val GameStart: Byte = 0x05
+    val GameEndResults: Byte = 0x06
     val CarState: Byte = 0x11
     val PlayerInput: Byte = 0x12
     val PlayerState: Byte = 0x13
@@ -61,6 +63,8 @@ object Server extends IOApp {
                   broadcastToAllSockets(LobbyState.serializeState(players.get.unsafeRunSync()))
                 } else if (!gameRunning) {
                   broadcastToAllSockets(GameState.sendGameTimer())
+                } else if (arePlayersDone(playerStates.get.unsafeRunSync())) {
+                  broadcastToAllSockets(GameState.endGame(playerStates.get.unsafeRunSync()))
                 } else IO.unit
             } yield ()
             }
@@ -151,7 +155,7 @@ object Server extends IOApp {
         .evalMap { datagram =>
           val now = System.currentTimeMillis()
 
-          val maybeInput = PlayerInput.decode(datagram.bytes.toArray)
+          var maybeInput = PlayerInput.decode(datagram.bytes.toArray)
 
           val updatePlayers: IO[Unit] =
             maybeInput.traverse_(inp =>
@@ -185,21 +189,76 @@ object Server extends IOApp {
               oldCarStates <- carStates.get
               oldPlayersStates <- playerStates.get
 
-              updatedCarStates = players.map { case (id, _) =>
-                val cp0 = GameState.track.points.head
-                val prevState = oldCarStates.getOrElse(id, CarState(id, cp0.x, cp0.y, 0, 0, 0))
-                val input = inputs.getOrElse(id, PlayerInput(id, 0, 0, drift = false))
-                id -> CarState.physicStep(prevState, input, dtSeconds)
+              // 1) Compute updatedCarStates only for “done” players:
+              updatedCarStates: Map[UUID, CarState] = players.flatMap {
+                case (id, player) =>
+                  // Build a default “previous PlayerState” if none exists
+                  val prevPlayerState: PlayerState =
+                    oldPlayersStates.getOrElse(
+                      player.uuid,
+                      PlayerState(
+                        id,
+                        player.username,
+                        System.currentTimeMillis(),
+                        0, 0f, 0, 0f, 0L, 0L, 0L, 0L
+                      )
+                    )
+
+                  val cp0 = GameState.track.points.head
+                  val prevCarState: CarState = oldCarStates.getOrElse(
+                    id,
+                    CarState(id, cp0.x, cp0.y, 0, 0, 0)
+                  )
+                  // Only step the physics if this player isn't “done”
+                  if (!isPlayerDone(prevPlayerState)) {
+                    val input: PlayerInput = inputs.getOrElse(
+                      id,
+                      PlayerInput(id, 0, 0, drift = false)
+                    )
+                    val nextCarState: CarState =
+                      CarState.physicStep(prevCarState, input, dtSeconds)
+
+                    Some(id -> nextCarState)
+                  } else {
+                    Some(id -> prevCarState)
+                  }
               }
 
-              updatePlayerState =
-                if (GameState.gameTime - 750 <= System.currentTimeMillis()) players.map { case (id, player) =>
-                  val cp0 = GameState.track.points.head
-                  val carState = oldCarStates.getOrElse(id, CarState(id, cp0.x, cp0.y, 0, 0, 0))
-                  val prevPlayerState = oldPlayersStates.getOrElse(id, PlayerState(id, player.username, System.currentTimeMillis(), 0, 0f, 0, 0f, 0L, 0L, 0L, 0L))
-                  id -> PlayerState.distanceStep(prevPlayerState, carState, GameState.track)
+              // 2) Compute updatePlayerState only if “within the 750ms window” and player is “done”
+              updatePlayerState: Map[UUID, PlayerState] =
+                if (GameState.gameTime - 750 <= System.currentTimeMillis()) {
+                  players.flatMap {
+                    case (id, player) =>
+                      // Default “previous PlayerState”
+                      val prevPS: PlayerState =
+                        oldPlayersStates.getOrElse(
+                          id,
+                          PlayerState(
+                            id,
+                            player.username,
+                            System.currentTimeMillis(),
+                            0, 0f, 0, 0f, 0L, 0L, 0L, 0L
+                          )
+                        )
+
+                      if (!isPlayerDone(prevPS)) {
+                        // Re‐compute or fetch the CarState for this id
+                        val cp0 = GameState.track.points.head
+                        val carState = oldCarStates.getOrElse(
+                          id,
+                          CarState(id, cp0.x, cp0.y, 0, 0, 0)
+                        )
+                        val nextPS: PlayerState =
+                          PlayerState.distanceStep(prevPS, carState, GameState.track)
+                        Some(id -> nextPS)
+                      } else {
+                        Some(id -> prevPS.copy())
+                      }
+                  }
+                } else {
+                  Map.empty[UUID, PlayerState]
                 }
-                else Map.empty[UUID, PlayerState]
+
 
               _ <- carStates.set(updatedCarStates)
               _ <- playerStates.set(updatePlayerState)
@@ -238,7 +297,7 @@ object Server extends IOApp {
       clientRef.updateAndGet { currentMap =>
         currentMap.filter { case (_, lastSeen) => lastSeen >= cutoff }
       }.flatMap { newMap =>
-        IO.println(s"[Cleanup] Active clients: ${newMap.keys.toList}")
+        IO.unit//IO.println(s"[Cleanup] Active clients: ${newMap.keys.toList}")
       }
     }
   }

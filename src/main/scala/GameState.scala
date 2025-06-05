@@ -1,4 +1,6 @@
 import LobbyState.{Player, timeStart}
+import PlayerState.serializeResults
+import Server.{carStates, playerInputs, playerStates, players}
 import cats.effect.unsafe.implicits.global
 import cats.effect.{IO, Ref}
 import fs2.Chunk
@@ -29,6 +31,12 @@ object GameState {
   }
 
   def startGame(): Unit = {
+    // Reset some data
+    timeStart = 0
+    _initiated = false
+    _gameRunning = false
+    playerInputs.set(Map.empty).unsafeRunSync()
+
     _gameStarted = true
     _gameTime = System.currentTimeMillis() + 5_000
   }
@@ -39,6 +47,11 @@ object GameState {
     _gameStarted = false
     _gameTime = 0
     _gameRunning = false
+
+    players.update(m => m.map(s => s.copy(_2 = s._2.copy(isReady = false, isReadyToStart = false)))).unsafeRunSync()
+    playerStates.set(Map.empty).unsafeRunSync()
+    carStates.set(Map.empty).unsafeRunSync()
+    playerInputs.set(Map.empty).unsafeRunSync()
   }
 
   def serializeGameStart(): Chunk[Byte] = {
@@ -95,6 +108,13 @@ object GameState {
     buf.flip()
 
     Chunk.byteBuffer(buf)
+  }
+
+  def endGame(playerStates: Map[UUID, PlayerState]): Chunk[Byte] = {
+    val temp = serializeResults(playerStates)
+
+    resetGame()
+    temp
   }
 
   private def initCP(map: String): IndexedSeq[Vec2] = {

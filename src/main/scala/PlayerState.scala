@@ -1,9 +1,14 @@
-import GameState.track
-import Server.MsgType
+import GameState.{resetGame, track}
+import Server.{MsgType, playerStates}
+import cats.effect.unsafe.implicits.global
+import cats.effect.{IO, Ref}
 import fs2.Chunk
 
+import java.nio.charset.StandardCharsets
 import java.nio.{ByteBuffer, ByteOrder}
 import java.util.UUID
+
+case class PlayerState(uuid: UUID, username: String, ts: Long, segment: Int, segmentDist: Float, laps: Int, lapsDist : Float, lapTime: Long, totalTime: Long, bestLap: Long, lastLap: Long, hasStarted: Boolean = false)
 
 case class Vec2(x: Double, y: Double) {
   def -(b: Vec2): Vec2 = Vec2(x - b.x, y - b.y)
@@ -68,8 +73,6 @@ class Track(val points: IndexedSeq[Vec2]) {
     (bestSegment, bestT, minDistance)
   }
 }
-
-case class PlayerState(uuid: UUID, username: String, ts: Long, segment: Int, segmentDist: Float, laps: Int, lapsDist : Float, lapTime: Long, totalTime: Long, bestLap: Long, lastLap: Long, hasStarted: Boolean = false)
 
 object PlayerState {
   // Find current position on track
@@ -166,12 +169,46 @@ object PlayerState {
     )
   }
 
+  def isPlayerDone(p: PlayerState): Boolean = p.laps >= 1
+
+  def arePlayersDone(m: Map[UUID, PlayerState]): Boolean = m.nonEmpty && m.values.forall(isPlayerDone)
+  def arePlayersDone(m: Ref[IO, Map[UUID, PlayerState]]): IO[Boolean] = m.get.map(m => arePlayersDone(m))
+
+  def serializeResults(playersStates: Map[UUID, PlayerState]): Chunk[Byte] = {
+    val count = playersStates.size
+
+    val recordSize = 1 + 2 + count * 1 + playersStates.map(_._2.username.length).sum + count * (16 + 8 + 8)
+    val bufferSize = 2 + recordSize
+
+    // record ; type ; uuid ; username length ; username ; best lap ; total time
+    val buf = ByteBuffer.allocate(bufferSize).order(ByteOrder.BIG_ENDIAN)
+
+    buf.putShort(recordSize.toShort)
+    buf.put(MsgType.GameEndResults)
+    buf.putShort(count.toShort)
+
+    for (ps <- playersStates.values) {
+      buf.putLong(ps.uuid.getMostSignificantBits)
+      buf.putLong(ps.uuid.getLeastSignificantBits)
+
+      buf.put(ps.username.length.toByte)
+      buf.put(ps.username.getBytes(StandardCharsets.UTF_8))
+
+      buf.putLong(ps.bestLap)
+      buf.putLong(ps.totalTime)
+    }
+
+    buf.flip()
+
+    Chunk.byteBuffer(buf)
+  }
+
   def serializePlayerState(playersStates: Map[UUID, PlayerState]): Chunk[Byte] = {
     // Number of players
     val count = playersStates.size
 
     val recordSize = 16 + 4 * 4 + 4 * 8
-    val bufferSize = 1 + 2 + count * (recordSize + 2) + playersStates.map(_._2.username.length).sum
+    val bufferSize = 1 + 2 + count * (recordSize + 1) + playersStates.map(_._2.username.length).sum
     val buf = ByteBuffer.allocate(bufferSize).order(ByteOrder.BIG_ENDIAN)
     buf.put(MsgType.PlayerState)
 
