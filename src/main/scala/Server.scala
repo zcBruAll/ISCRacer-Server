@@ -58,13 +58,21 @@ object Server extends IOApp {
           // Stream to periodically send lobby state to this client
           Stream.awakeEvery[IO](500.millis).evalMap { _ =>
             for {
+              pMap <- players.get
+              states <- playerStates.get
+              runners = pMap.collect { case(_, p) if p.isReadyToStart => p }
+              inLobby = pMap.collect { case(_, p) if !p.isReadyToStart => p }
               _ <-
                 if (!gameStarted && !initiated) {
-                  broadcastToAllSockets(LobbyState.serializeState(players.get.unsafeRunSync()))
+                  broadcastToAllSockets(LobbyState.serializeState(pMap))
                 } else if (!gameRunning) {
-                  broadcastToAllSockets(GameState.sendGameTimer())
-                } else if (arePlayersDone(playerStates.get.unsafeRunSync())) {
-                  broadcastToAllSockets(GameState.endGame(playerStates.get.unsafeRunSync()))
+                  runners.toList.traverse_(_.socket.write(GameState.sendGameTimer()))
+                } else if (arePlayersDone(states)) {
+                  runners.toList.traverse_(_.socket.write(GameState.endGame(states)))
+                } else IO.unit
+              _ <-
+                if (gameStarted || initiated) {
+                  inLobby.toList.traverse_(_.socket.write(LobbyState.serializeRaceStatus(pMap, states)))
                 } else IO.unit
             } yield ()
             }
@@ -141,6 +149,7 @@ object Server extends IOApp {
                 map.removed(playerUuid)
               } >>
               IO.println(s"[TCP] Client disconnected: ${clientSocket.remoteAddress.unsafeRunSync()}")
+              //clientSocket.endOfOutput
             }
       }
       // Run all client streams in parallel (handle multiple clients concurrently)
@@ -181,7 +190,7 @@ object Server extends IOApp {
           Stream.eval(IO.println(s"[UDP] Input error: ${err.getMessage}"))
         }.concurrently {
           // Stream that ticks approximately every 33ms (30 times per second)
-          Stream.awakeEvery[IO](tickDt).evalFilter(_ => GameState.arePlayersReady(players)).evalMap { _ =>
+          Stream.awakeEvery[IO](tickDt).evalFilter(_ => GameState.shouldRun(players)).evalMap { _ =>
             for {
               players <- players.get
               clients <- clientRef.get
@@ -190,7 +199,7 @@ object Server extends IOApp {
               oldPlayersStates <- playerStates.get
 
               // 1) Compute updatedCarStates only for “done” players:
-              updatedCarStates: Map[UUID, CarState] = players.flatMap {
+              updatedCarStates: Map[UUID, CarState] = players.filter(_._2.isReadyToStart).flatMap {
                 case (id, player) =>
                   // Build a default “previous PlayerState” if none exists
                   val prevPlayerState: PlayerState =
@@ -227,7 +236,7 @@ object Server extends IOApp {
               // 2) Compute updatePlayerState only if “within the 750ms window” and player is “done”
               updatePlayerState: Map[UUID, PlayerState] =
                 if (GameState.gameTime - 750 <= System.currentTimeMillis()) {
-                  players.flatMap {
+                  players.filter(_._2.isReadyToStart).flatMap {
                     case (id, player) =>
                       // Default “previous PlayerState”
                       val prevPS: PlayerState =
@@ -274,7 +283,7 @@ object Server extends IOApp {
           }
         }.concurrently {
           // Stream that ticks approximately every 33ms (30 times per second)
-          Stream.awakeEvery[IO](33.millis).evalFilter(_ => GameState.arePlayersReady(players)).evalMap { _ =>
+          Stream.awakeEvery[IO](33.millis).evalFilter(_ => GameState.shouldRun(players)).evalMap { _ =>
               for {
                 states <- playerStates.get
                 clients <- clientRef.get

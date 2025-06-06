@@ -30,6 +30,10 @@ object GameState {
     }
   }
 
+  def shouldRun(players: Ref[IO, Map[UUID, Player]]): IO[Boolean] = {
+    if (_gameStarted) IO.pure(true) else arePlayersReady(players)
+  }
+
   def startGame(): Unit = {
     // Reset some data
     timeStart = 0
@@ -48,7 +52,12 @@ object GameState {
     _gameTime = 0
     _gameRunning = false
 
-    players.update(m => m.map(s => s.copy(_2 = s._2.copy(isReady = false, isReadyToStart = false)))).unsafeRunSync()
+    players.update(m => m.map { case (id, ply) =>
+      if (playerStates.get.unsafeRunSync().keySet.contains(id))
+        id -> ply.copy(isReady = false, isReadyToStart = false)
+      else
+        id -> ply
+    }).unsafeRunSync()
     playerStates.set(Map.empty).unsafeRunSync()
     carStates.set(Map.empty).unsafeRunSync()
     playerInputs.set(Map.empty).unsafeRunSync()
