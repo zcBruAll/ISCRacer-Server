@@ -66,7 +66,7 @@ object GameState {
   def serializeGameStart(): Chunk[Byte] = {
     val map = "map_1"
 
-    _track = new Track(initCP(map))
+    _track = Track.fromMap(map, initCP(map))
 
     val x0 = track.points(0).x
     val y0 = track.points(0).y

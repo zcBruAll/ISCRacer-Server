@@ -17,8 +17,9 @@ object CarState {
   private val MAX_TURN_RATE = 1.8           // radians per second at speed
   private val MIN_TURN_SPEED = 30.0         // minimum speed for effective turning
   private val MAX_SPEED = 1000.0            // maximum forward speed
+  private val MAP_SIZE = 4096               // map size in px
 
-  def physicStep(state: CarState, input: PlayerInput, dt: Double): CarState = {
+  def physicStep(state: CarState, input: PlayerInput, track: Track, dt: Double): CarState = {
     // Ensure UUIDs match
     require(state.uuid == input.uuid, "State and input UUIDs must match")
 
@@ -36,8 +37,11 @@ object CarState {
     val forwardVelocity = state.vx * forwardX + state.vy * forwardY
     val lateralVelocity = state.vx * lateralX + state.vy * lateralY
 
+    val surface = track.surfaceQuality(state.x, state.y)
+    val accelFactor = 0.6 + 0.4 * surface
+
     // Calculate acceleration based on throttle input
-    val acceleration = calculateAcceleration(input.throttle, forwardVelocity)
+    val acceleration = calculateAcceleration(input.throttle, forwardVelocity) * accelFactor
     val newForwardVelocity = applyAcceleration(forwardVelocity, acceleration, dt)
 
     // Handle steering and drift mechanics
@@ -47,6 +51,7 @@ object CarState {
       input.steer,
       input.drift,
       currentSpeed,
+      surface,
       dt
     )
 
@@ -63,16 +68,24 @@ object CarState {
     val draggedVx = newVx * pow(DRAG_COEFFICIENT, dt * 60)
     val draggedVy = newVy * pow(DRAG_COEFFICIENT, dt * 60)
 
+    // Slow down if off track
+    val slowF = 1 - 0.05 * (1 - track.surfaceQuality(state.x + draggedVx * dt, state.y + draggedVy * dt))
+    val finalVx = draggedVx * slowF
+    val finalVy = draggedVy * slowF
+
     // Update position
-    val newX = state.x + draggedVx * dt
-    val newY = state.y + draggedVy * dt
+    var newX = state.x + finalVx * dt
+    newX = if (newX < 0) MAP_SIZE + newX else newX % MAP_SIZE
+
+    var newY = state.y + finalVy * dt
+    newY = if (newY < 0) MAP_SIZE + newY else newY % MAP_SIZE
 
     CarState(
       uuid = state.uuid,
       x = newX,
       y = newY,
-      vx = draggedVx,
-      vy = draggedVy,
+      vx = finalVx,
+      vy = finalVy,
       direction = newDirection
     )
   }
@@ -107,6 +120,7 @@ object CarState {
                               steer: Float,
                               drift: Boolean,
                               speed: Double,
+                              surface: Double,
                               dt: Double
                             ): (Double, Double) = {
 
@@ -127,7 +141,7 @@ object CarState {
     val gripFactor = if (isDrifting) DRIFT_GRIP_REDUCTION else LATERAL_GRIP
 
     // Reduce lateral velocity based on grip
-    val adjustedLateralVelocity = lateralVelocity * (1.0 - gripFactor * dt * 10)
+    val adjustedLateralVelocity = lateralVelocity * (1.0 - gripFactor * surface * dt * 10)
 
     (newDirection, adjustedLateralVelocity)
   }

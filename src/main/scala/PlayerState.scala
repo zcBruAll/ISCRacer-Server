@@ -7,6 +7,7 @@ import fs2.Chunk
 import java.nio.charset.StandardCharsets
 import java.nio.{ByteBuffer, ByteOrder}
 import java.util.UUID
+import javax.imageio.ImageIO
 
 case class PlayerState(uuid: UUID, username: String, ts: Long, segment: Int, segmentDist: Float, laps: Int, lapsDist : Float, lapTime: Long, totalTime: Long, bestLap: Long, lastLap: Long, hasStarted: Boolean = false)
 
@@ -21,9 +22,18 @@ case class Vec2(x: Double, y: Double) {
 }
 
 // Track with sequential checkpoints (closed loop)
-class Track(val points: IndexedSeq[Vec2]) {
+class Track(val points: IndexedSeq[Vec2], val grayscale: Array[Array[Int]]) {
   private val n = points.length
   def next(i: Int): Int = (i + 1) % n
+
+  val width: Int = if (grayscale.nonEmpty) grayscale(0).length else 0
+  val height: Int = grayscale.length
+
+  def surfaceQuality(x: Double, y: Double): Double = {
+    val xi = math.max(0, math.min(width - 1, x.round.toInt))
+    val yi = math.max(0, math.min(height - 1, y.round.toInt))
+    1D - (grayscale(yi)(xi).toDouble / 255D)
+  }
 
   val segmentLength: Array[Double] = points.indices.map { i =>
     val a = points(i)
@@ -71,6 +81,28 @@ class Track(val points: IndexedSeq[Vec2]) {
     }
 
     (bestSegment, bestT, minDistance)
+  }
+}
+
+object Track {
+  def fromMap(name: String, points: IndexedSeq[Vec2]): Track = {
+    val stream = Option(getClass.getResourceAsStream(s"/map/tracks/$name/grayscale.png"))
+      .getOrElse(throw new RuntimeException(s"Missing grayscale map for $name"))
+    val img =  ImageIO.read(stream)
+    val w = img.getWidth
+    val h = img.getHeight
+    val data = Array.ofDim[Int](h, w)
+    var y = 0
+    while (y < h) {
+      var x = 0
+      while (x < w) {
+        val rgb = img.getRGB(x, y)
+        data(y)(x) = rgb & 0xff
+        x += 1
+      }
+      y += 1
+    }
+    new Track(points, data)
   }
 }
 

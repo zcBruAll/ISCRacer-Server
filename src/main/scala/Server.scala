@@ -225,7 +225,7 @@ object Server extends IOApp {
                       PlayerInput(id, 0, 0, drift = false)
                     )
                     val nextCarState: CarState =
-                      CarState.physicStep(prevCarState, input, dtSeconds)
+                      CarState.physicStep(prevCarState, input, GameState.track, dtSeconds)
 
                     Some(id -> nextCarState)
                   } else {
