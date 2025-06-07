@@ -12,8 +12,9 @@ object CarState {
   private val MAX_DECELERATION = 800.0     // pixels/second² (braking)
   private val DRAG_COEFFICIENT = 0.98       // air resistance per frame
   private val LATERAL_GRIP = 0.85           // how much the car grips the road sideways
-  private val DRIFT_THRESHOLD = 0.3         // minimum drift input to activate drift mode
-  private val DRIFT_GRIP_REDUCTION = 0.6    // how much grip is reduced in drift mode
+  private val DRIFT_GRIP_REDUCTION = 0.2    // how much grip is reduced in drift mode
+  private val HAND_BRAKE_DECELERATION = 800.0 // additional deceleration when drifting
+  private val DDRIFT_TURN_MULTIPLIER = 1.5  // more rotation when handbrake is used
   private val MAX_TURN_RATE = 1.8           // radians per second at speed
   private val MIN_TURN_SPEED = 30.0         // minimum speed for effective turning
   private val MAX_SPEED = 1000.0            // maximum forward speed
@@ -44,6 +45,9 @@ object CarState {
     val acceleration = calculateAcceleration(input.throttle, forwardVelocity) * accelFactor
     val newForwardVelocity = applyAcceleration(forwardVelocity, acceleration, dt)
 
+    val forwardAfterBrake =
+      if (input.drift) applyHandBrake(newForwardVelocity, dt) else newForwardVelocity
+
     // Handle steering and drift mechanics
     val (newDirection, adjustedLateralVelocity) = handleSteering(
       normalizedDirection,
@@ -61,8 +65,8 @@ object CarState {
     val newLateralX = -sin(newDirection)
     val newLateralY = cos(newDirection)
 
-    val newVx = newForwardVelocity * newForwardX + adjustedLateralVelocity * newLateralX
-    val newVy = newForwardVelocity * newForwardY + adjustedLateralVelocity * newLateralY
+    val newVx = forwardAfterBrake * newForwardX + adjustedLateralVelocity * newLateralX
+    val newVy = forwardAfterBrake * newForwardY + adjustedLateralVelocity * newLateralY
 
     // Apply drag
     val draggedVx = newVx * pow(DRAG_COEFFICIENT, dt * 60)
@@ -114,6 +118,12 @@ object CarState {
     }
   }
 
+  private def applyHandBrake(velocity: Double, dt: Double): Double = {
+    val decel = HAND_BRAKE_DECELERATION * dt
+    if (velocity > 0) math.max(0.0, velocity - decel)
+    else math.min(0.0, velocity + decel)
+  }
+
   private def handleSteering(
                               direction: Double,
                               lateralVelocity: Double,
@@ -133,11 +143,11 @@ object CarState {
       speed / MIN_TURN_SPEED * 0.5
     }
 
-    val turnRate = MAX_TURN_RATE * clampedSteer * speedFactor
+    val turnRate = MAX_TURN_RATE * clampedSteer * speedFactor * (if (drift) DDRIFT_TURN_MULTIPLIER else 1)
     val newDirection = normalizeAngle(direction + turnRate * dt)
 
     // Handle lateral grip and drift
-    val isDrifting = drift && math.abs(clampedSteer) > DRIFT_THRESHOLD
+    val isDrifting = drift
     val gripFactor = if (isDrifting) DRIFT_GRIP_REDUCTION else LATERAL_GRIP
 
     // Reduce lateral velocity based on grip
